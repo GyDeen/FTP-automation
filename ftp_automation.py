@@ -5,6 +5,7 @@ FTP automation transfer tool.
 Supports uploading and downloading files in different formats.
 """
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -25,14 +26,42 @@ logger = get_logger("ftp_automation")
 def load_config(path: str = "config.yaml") -> dict:
     """Load a YAML configuration file."""
     cfg_path = Path(path)
-    if not cfg_path.exists():
+    if not cfg_path.exists() and path == "config.yaml":
         cfg_path = PROJECT_ROOT / "config.yaml"
     if not cfg_path.exists():
-        logger.warning("Config file not found, using defaults")
-        return {}
+        raise FileNotFoundError(f"Config file not found: {path}")
 
     with open(cfg_path, encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
+
+    if not isinstance(cfg, dict):
+        raise ValueError("Configuration root must be a mapping")
+    ftp_cfg = cfg.get("ftp")
+    if not isinstance(ftp_cfg, dict) or not ftp_cfg.get("host"):
+        raise ValueError("Configuration requires ftp.host")
+
+    password_env = ftp_cfg.pop("password_env", None)
+    if password_env:
+        try:
+            ftp_cfg["password"] = os.environ[password_env]
+        except KeyError as exc:
+            raise ValueError(
+                f"Environment variable {password_env!r} is required for the FTP password"
+            ) from exc
+
+    tasks = cfg.get("tasks", [])
+    if not isinstance(tasks, list):
+        raise ValueError("Configuration tasks must be a list")
+    for index, task in enumerate(tasks):
+        if not isinstance(task, dict):
+            raise ValueError(f"Task {index} must be a mapping")
+        action = task.get("action")
+        if action not in ("upload", "download"):
+            raise ValueError(f"Task {index} has unsupported action: {action!r}")
+        local_dir = Path(task.get("local_dir", "."))
+        if not local_dir.is_absolute():
+            task["local_dir"] = str((cfg_path.parent / local_dir).resolve())
+
     logger.info("Loaded config from %s", cfg_path)
     return cfg
 
@@ -42,16 +71,17 @@ def load_config(path: str = "config.yaml") -> dict:
 def sync_upload(client: FTPClient, local_dir: str, remote_dir: str,
                 pattern: str = "*"):
     """Synchronize a local directory to a remote directory."""
-    client.cwd(remote_dir)
     src = Path(local_dir)
+    if not src.is_dir():
+        raise NotADirectoryError(f"Local upload directory not found: {src}")
+    client.cwd(remote_dir)
     for f in src.glob(pattern):
         if not f.is_file():
             continue
         if not validate(str(f)):
             logger.warning("Validation failed, skipping: %s", f)
             continue
-        remote_path = f"{remote_dir.rstrip('/')}/{f.name}"
-        client.upload(str(f), remote_path)
+        client.upload(str(f), f.name)
     logger.info("Sync upload complete: %s -> %s", local_dir, remote_dir)
 
 
@@ -62,9 +92,23 @@ def sync_download(client: FTPClient, remote_dir: str, local_dir: str):
     for info in files:
         if info["is_dir"]:
             continue
-        local_path = str(Path(local_dir) / info["name"])
-        client.download(info["name"], local_path)
+        local_path = _safe_download_path(local_dir, info["name"])
+        client.download(info["name"], str(local_path))
     logger.info("Sync download complete: %s -> %s", remote_dir, local_dir)
+
+
+def _safe_download_path(local_dir: str, remote_name: str) -> Path:
+    """Return a destination confined to local_dir for a top-level remote file."""
+    if not remote_name or remote_name in (".", ".."):
+        raise ValueError(f"Unsafe remote filename: {remote_name!r}")
+    if "/" in remote_name or "\\" in remote_name:
+        raise ValueError(f"Remote filename contains a path separator: {remote_name!r}")
+
+    base = Path(local_dir).resolve()
+    destination = (base / remote_name).resolve()
+    if os.path.commonpath((str(base), str(destination))) != str(base):
+        raise ValueError(f"Remote filename escapes destination: {remote_name!r}")
+    return destination
 
 
 # ── Task execution ───────────────────────────────────────────
