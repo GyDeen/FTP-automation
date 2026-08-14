@@ -2,13 +2,18 @@
 FTP client wrapper — connections, retries, transfers, and directory operations.
 """
 import ftplib
+import os
+import ssl
+import tempfile
 import time
-from typing import Optional, Callable
 from pathlib import Path
+from typing import Callable, Optional
 
 from utils.logger import get_logger
 
 logger = get_logger("ftp_client")
+
+ProgressCallback = Callable[[int, int], None]
 
 
 class FTPClient:
@@ -25,7 +30,8 @@ class FTPClient:
         retry_delay: float = 2.0,
         passive: bool = True,
         encoding: str = "utf-8",
-        **kwargs,
+        tls: bool = False,
+        tls_context: Optional[ssl.SSLContext] = None,
     ):
         self.host = host
         self.port = port
@@ -36,6 +42,8 @@ class FTPClient:
         self.retry_delay = retry_delay
         self.passive = passive
         self.encoding = encoding
+        self.tls = tls
+        self.tls_context = tls_context
         self._conn: Optional[ftplib.FTP] = None
 
     # ── Connection lifecycle ──────────────────────────────────
@@ -43,17 +51,28 @@ class FTPClient:
     def connect(self) -> "FTPClient":
         """Connect and log in, retrying up to max_retries times on failure."""
         for attempt in range(1, self.max_retries + 1):
+            conn: Optional[ftplib.FTP] = None
             try:
-                conn = ftplib.FTP()
+                if self.tls:
+                    context = self.tls_context or ssl.create_default_context()
+                    conn = ftplib.FTP_TLS(context=context)
+                else:
+                    conn = ftplib.FTP()
+                conn.encoding = self.encoding
                 conn.connect(self.host, self.port, self.timeout)
                 conn.login(self.user, self.password)
-                conn.encoding = self.encoding
-                if self.passive:
-                    conn.set_pasv(True)
+                if isinstance(conn, ftplib.FTP_TLS):
+                    conn.prot_p()
+                conn.set_pasv(self.passive)
                 self._conn = conn
                 logger.info("Connected to %s:%d (user=%s)", self.host, self.port, self.user)
                 return self
             except ftplib.all_errors as exc:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except OSError:
+                        pass
                 logger.warning("Connection attempt %d/%d failed: %s", attempt, self.max_retries, exc)
                 if attempt < self.max_retries:
                     time.sleep(self.retry_delay)
@@ -92,27 +111,42 @@ class FTPClient:
     def cwd(self, path: str) -> "FTPClient":
         """Change the remote working directory, creating missing parents."""
         self.ensure_connected()
-        try:
-            self._conn.cwd(path)
-        except ftplib.error_perm:
-            parts = path.strip("/").split("/")
-            for i in range(1, len(parts) + 1):
-                sub = "/".join(parts[:i])
-                try:
-                    self._conn.cwd(sub)
-                except ftplib.error_perm:
-                    self._conn.mkd(sub)
-                    self._conn.cwd(sub)
+        parts = [part for part in path.replace("\\", "/").split("/")
+                 if part not in ("", ".")]
+        if ".." in parts:
+            raise ValueError(f"Remote directory must not contain '..': {path}")
+
+        if path.startswith("/"):
+            self._conn.cwd("/")
+        for part in parts:
+            try:
+                self._conn.cwd(part)
+            except ftplib.error_perm:
+                self._conn.mkd(part)
+                self._conn.cwd(part)
         return self
 
     def list_files(self, remote_dir: str = ".") -> list[dict]:
         """List remote files with their names, sizes, and types."""
         self.ensure_connected()
+        try:
+            return [
+                {
+                    "name": name,
+                    "size": int(facts.get("size", "0")),
+                    "is_dir": facts.get("type") == "dir",
+                }
+                for name, facts in self._conn.mlsd(remote_dir)
+                if facts.get("type") not in ("cdir", "pdir")
+            ]
+        except (AttributeError, ftplib.error_perm, ftplib.error_proto):
+            pass
+
         items: list[str] = []
         self._conn.dir(remote_dir, items.append)
         parsed = []
         for line in items:
-            parts = line.split(maxsplit=9)
+            parts = line.split(maxsplit=8)
             if len(parts) < 9:
                 continue
             is_dir = parts[0].startswith("d")
@@ -124,7 +158,7 @@ class FTPClient:
     # ── File operations ───────────────────────────────────────
 
     def upload(self, local_path: str, remote_path: str,
-               callback: Optional[Callable] = None) -> int:
+               callback: Optional[ProgressCallback] = None) -> int:
         """Upload a local file to a remote path."""
         self.ensure_connected()
         lp = Path(local_path)
@@ -132,16 +166,24 @@ class FTPClient:
             raise FileNotFoundError(f"Local file not found: {lp}")
 
         total = lp.stat().st_size
+        sent = 0
+
+        def _on_chunk(data: bytes):
+            nonlocal sent
+            sent += len(data)
+            if callback:
+                callback(sent, total)
+
         with open(lp, "rb") as f:
             self._conn.storbinary(f"STOR {remote_path}", f, blocksize=8192,
-                                  callback=callback)
-        if callback:
-            callback(total, total)
+                                  callback=_on_chunk)
+        if callback and total == 0:
+            callback(0, 0)
         logger.info("Uploaded %s -> %s (%d bytes)", lp, remote_path, total)
         return total
 
     def download(self, remote_path: str, local_path: str,
-                 callback: Optional[Callable] = None) -> int:
+                 callback: Optional[ProgressCallback] = None) -> int:
         """Download a remote file to a local path."""
         self.ensure_connected()
         lp = Path(local_path)
@@ -159,10 +201,28 @@ class FTPClient:
             if callback:
                 callback(received, total)
 
-        with open(lp, "wb") as f:
-            self._conn.retrbinary(f"RETR {remote_path}",
-                                  lambda d: (f.write(d), _on_chunk(d)),
-                                  blocksize=8192)
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=str(lp.parent),
+                prefix=f".{lp.name}.",
+                suffix=".part",
+                delete=False,
+            ) as f:
+                temp_path = Path(f.name)
+
+                def _write_chunk(data: bytes):
+                    f.write(data)
+                    _on_chunk(data)
+
+                self._conn.retrbinary(f"RETR {remote_path}", _write_chunk,
+                                      blocksize=8192)
+            os.replace(str(temp_path), str(lp))
+        except Exception:
+            if temp_path is not None:
+                temp_path.unlink(missing_ok=True)
+            raise
         logger.info("Downloaded %s -> %s (%d bytes)", remote_path, lp, received)
         return received
 
