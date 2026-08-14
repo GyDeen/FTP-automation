@@ -26,6 +26,7 @@ class XMLHandler(BaseHandler):
     def write(self, path: "str | Path", data: Any) -> None:
         """Data may be an ET.Element or a serialized XML string."""
         path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(data, ET.Element):
             tree = ET.ElementTree(data)
             tree.write(path, encoding="utf-8", xml_declaration=True)

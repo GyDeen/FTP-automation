@@ -14,9 +14,10 @@ class JSONHandler(BaseHandler):
     def validate(self, path: "str | Path") -> bool:
         try:
             with open(path, encoding="utf-8") as f:
-                if Path(path).suffix == ".jsonl":
+                if Path(path).suffix.lower() == ".jsonl":
                     for line in f:
-                        json.loads(line)
+                        if line.strip():
+                            json.loads(line)
                 else:
                     json.load(f)
             return True
@@ -26,14 +27,15 @@ class JSONHandler(BaseHandler):
     def read(self, path: "str | Path") -> Any:
         path = Path(path)
         with open(path, encoding="utf-8") as f:
-            if path.suffix == ".jsonl":
+            if path.suffix.lower() == ".jsonl":
                 return [json.loads(line) for line in f if line.strip()]
             return json.load(f)
 
     def write(self, path: "str | Path", data: Any) -> None:
         path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
-            if path.suffix == ".jsonl":
+            if path.suffix.lower() == ".jsonl":
                 for item in data:
                     f.write(json.dumps(item, ensure_ascii=False) + "\n")
             else:

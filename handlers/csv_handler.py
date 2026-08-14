@@ -2,7 +2,6 @@
 CSV file handler.
 """
 import csv
-import io
 from pathlib import Path
 from typing import Any
 
@@ -14,16 +13,21 @@ class CSVHandler(BaseHandler):
 
     def validate(self, path: "str | Path") -> bool:
         try:
-            with open(path, newline="", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                next(reader)  # Require at least one header row.
-                return True
+            file_path = Path(path)
+            delimiter = self._detect_delimiter(file_path.suffix)
+            with open(file_path, newline="", encoding="utf-8-sig") as f:
+                reader = csv.reader(f, delimiter=delimiter)
+                headers = next(reader)
+                if not headers:
+                    return False
+                return all(len(row) == len(headers) for row in reader)
         except Exception:
             return False
 
     def read(self, path: "str | Path") -> dict:
         """Return {'headers': [...], 'rows': [[...], ...]}."""
         path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
         delimiter = self._detect_delimiter(path.suffix)
         rows: list[list[str]] = []
         with open(path, newline="", encoding="utf-8-sig") as f:

@@ -18,7 +18,9 @@ class ImageHandler(BaseHandler):
 
     def validate(self, path: "str | Path") -> bool:
         if not HAS_PIL:
-            return Path(path).exists()
+            file_path = Path(path)
+            return (file_path.is_file()
+                    and file_path.stat().st_size > 0)
         try:
             with Image.open(path) as img:
                 img.verify()
