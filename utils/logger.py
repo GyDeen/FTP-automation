@@ -20,7 +20,10 @@ def get_logger(name: str, level: int = logging.INFO,
     # Coloured console handler.
     console = logging.StreamHandler(sys.stdout)
     console.setLevel(level)
-    console.setFormatter(_ColorFormatter(
+    formatter_class = (_ColorFormatter
+                       if getattr(console.stream, "isatty", lambda: False)()
+                       else logging.Formatter)
+    console.setFormatter(formatter_class(
         "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     ))
