@@ -1,0 +1,6 @@
+# Core dependency (the Python standard library covers most functionality)
+PyYAML>=6.0        # YAML configuration parsing
+# Optional dependencies (uncomment as needed)
+# Pillow>=10.0      # Image handler — pip install Pillow
+# pandas>=2.0       # Tabular data processing — pip install pandas
+# requests>=2.31    # HTTP(S) transfer extension

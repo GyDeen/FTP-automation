@@ -1,0 +1,76 @@
+# ═══════════════════════════════════════════════════════════════════
+# FTP automation transfer — configuration file
+#  Usage: python3 ftp_automation.py upload      (upload)
+#         python3 ftp_automation.py download    (download)
+# ═══════════════════════════════════════════════════════════════════
+
+# ──── 1. FTP server connection ─────────────────────────────────
+
+ftp:
+
+  # IP address or domain name of the FTP server
+  #   127.0.0.1 = local testing (with test_ftp_server.py)
+  #   Your server, for example: "192.168.1.100" or "ftp.example.com"
+  host: "127.0.0.1"
+
+  # Port number
+  #   Standard FTP = 21
+  #   Test server (test_ftp_server.py) = 2121
+  port: 2121
+
+  # Login username
+  user: "test"
+
+  # Login password
+  password: "test"
+
+  # Connection timeout in seconds
+  #   A connection timeout counts as one failed attempt and triggers a retry.
+  timeout: 10
+
+  # Maximum retries after connection failures
+  max_retries: 2
+
+  # Delay in seconds between retries
+  retry_delay: 1.0
+
+  # Passive mode — almost always true
+  #   true  = the client connects to the server's data port (firewall-friendly)
+  #   false = the server connects to the client (often fails on many networks)
+  passive: true
+
+  # Filename encoding
+  #   UTF-8 is typical; legacy servers may use GBK.
+  encoding: "utf-8"
+
+
+# ──── 2. Task list ─────────────────────────────────────────────
+
+tasks:
+
+    # ── First task: upload ──
+  - name: "Data file upload"       # Task name (for identification only; not used by the logic)
+
+    action: "upload"               # Action type: "upload" or "download"
+
+    local_dir: "./data"            # Local directory path
+                                 #   "./data" = data directory under the project root
+                                 #   You can also use an absolute path, such as "/Users/xxx/data"
+
+    remote_dir: "/backup/data"     # Destination directory on the FTP server
+                                 #   It is created automatically if it does not exist.
+
+    pattern: "*"                   # Filename matching pattern
+                                 #   "*"     = all files
+                                 #   "*.csv" = CSV files only
+                                 #   "*.txt" = text files only
+
+    # ── Second task: download ──
+  - name: "Download test"
+    action: "download"             # download = retrieve files from FTP to the local machine
+
+    remote_dir: "/uploads"         # FTP server directory to download from
+
+    local_dir: "./downloads"       # Local destination directory
+
+    pattern: "*"                   # Currently unused for downloads; reserved for future use
