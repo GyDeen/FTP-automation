@@ -27,24 +27,24 @@ class FTPHandler(threading.Thread):
         self.cwd = "/"
         self.data_port = None
         self.type = "A"
+        self._running = True
 
     def run(self):
         self.send("220 MinFTP ready")
-        while True:
+        while self._running:
             try:
                 data = self.conn.recv(4096).decode("utf-8", errors="replace").strip()
                 if not data:
                     break
-            except (ConnectionResetError, BrokenPipeError):
+            except (ConnectionResetError, BrokenPipeError, OSError):
                 break
 
             for line in data.split("\r\n"):
                 line = line.strip()
                 if not line:
                     continue
-                parts = line.split()
-                cmd = parts[0].upper()
-                args = parts[1] if len(parts) > 1 else ""
+                cmd, _, args = line.partition(" ")
+                cmd = cmd.upper()
                 log.info(">> %s %s", cmd, args)
 
                 handler = getattr(self, f"cmd_{cmd}", self.cmd_UNKN)
@@ -52,8 +52,14 @@ class FTPHandler(threading.Thread):
                     handler(args)
                 except Exception as e:
                     self.send(f"550 Error: {e}")
+                if not self._running:
+                    break
 
-        self.conn.close()
+        try:
+            self.conn.close()
+        except OSError:
+            pass
+        self._close_data_listener()
 
     def send(self, msg):
         self.conn.sendall(f"{msg}\r\n".encode())
@@ -77,10 +83,15 @@ class FTPHandler(threading.Thread):
         self.send(f'257 "{self.cwd}" is current directory')
 
     def cmd_CWD(self, args):
+        full = self._abs(args)
+        if not os.path.isdir(full):
+            raise FileNotFoundError(f"Directory not found: {args}")
         if args.startswith("/"):
-            self.cwd = args
+            self.cwd = os.path.normpath(args)
         else:
             self.cwd = os.path.normpath(f"{self.cwd}/{args}")
+        if not self.cwd.startswith("/"):
+            self.cwd = f"/{self.cwd}"
         self.send("250 CWD successful")
 
     def cmd_MKD(self, args):
@@ -97,6 +108,7 @@ class FTPHandler(threading.Thread):
 
     def cmd_PASV(self, args):
         # Enter passive mode on a temporary port.
+        self._close_data_listener()
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         s.listen(1)
@@ -130,12 +142,33 @@ class FTPHandler(threading.Thread):
             del self._data_listener
         self.send("226 Directory send OK")
 
+    def cmd_MLSD(self, args):
+        if not hasattr(self, "_data_listener"):
+            self.send("425 No data connection")
+            return
+        self.send("150 Opening data connection")
+        data_conn, _ = self._data_listener.accept()
+        full = self._abs(args) if args else self._abs("")
+        try:
+            lines = []
+            for name in sorted(os.listdir(full)):
+                path = os.path.join(full, name)
+                item_type = "dir" if os.path.isdir(path) else "file"
+                size = os.path.getsize(path) if os.path.isfile(path) else 0
+                lines.append(f"type={item_type};size={size}; {name}")
+            data_conn.sendall("\r\n".join(lines).encode())
+        finally:
+            data_conn.close()
+            self._close_data_listener()
+        self.send("226 Directory send OK")
+
     def cmd_RETR(self, args):
         if not hasattr(self, "_data_listener"):
             self.send("425 No data connection")
             return
         full = self._abs(args)
         if not os.path.isfile(full):
+            self._close_data_listener()
             self.send("550 File not found")
             return
         size = os.path.getsize(full)
@@ -173,7 +206,7 @@ class FTPHandler(threading.Thread):
 
     def cmd_QUIT(self, args):
         self.send("221 Bye")
-        self.conn.close()
+        self._running = False
 
     def cmd_NOOP(self, args):
         self.send("200 OK")
@@ -187,8 +220,21 @@ class FTPHandler(threading.Thread):
         if path.startswith("/"):
             rel = path.lstrip("/")
         else:
-            rel = os.path.normpath(f"{self.cwd.lstrip('/')}/{path}")
-        return os.path.join(self.root, rel)
+            rel = os.path.normpath(os.path.join(self.cwd.lstrip("/"), path))
+        root = os.path.realpath(self.root)
+        candidate = os.path.realpath(os.path.join(root, rel))
+        if os.path.commonpath((root, candidate)) != root:
+            raise PermissionError(f"Path escapes FTP root: {path}")
+        return candidate
+
+    def _close_data_listener(self):
+        listener = getattr(self, "_data_listener", None)
+        if listener is not None:
+            try:
+                listener.close()
+            except OSError:
+                pass
+            del self._data_listener
 
 
 def main():
