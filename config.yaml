@@ -23,6 +23,8 @@ ftp:
 
   # Login password
   password: "test"
+  # For deployed environments, omit password and use an environment variable:
+  # password_env: "FTP_PASSWORD"
 
   # Connection timeout in seconds
   #   A connection timeout counts as one failed attempt and triggers a retry.
@@ -38,6 +40,10 @@ ftp:
   #   true  = the client connects to the server's data port (firewall-friendly)
   #   false = the server connects to the client (often fails on many networks)
   passive: true
+
+  # Encrypt the control and data channels with explicit FTPS
+  #   Keep false only for trusted local test servers that do not support TLS.
+  tls: false
 
   # Filename encoding
   #   UTF-8 is typical; legacy servers may use GBK.

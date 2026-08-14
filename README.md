@@ -2,7 +2,7 @@
 
 A configurable Python toolkit for batch file transfers over FTP. It combines a YAML-driven command-line interface, connection retry handling, remote directory management, and format-aware validation for CSV, JSON, XML, images, and arbitrary binary files.
 
-> **Security note:** FTP does not encrypt credentials or transferred data. Use this project only on trusted networks. For sensitive or internet-facing transfers, use SFTP or FTPS instead.
+> **Security note:** Plain FTP does not encrypt credentials or transferred data. Set `tls: true` to use explicit FTPS for sensitive or internet-facing transfers. SFTP is not supported.
 
 ## Features
 
@@ -10,6 +10,7 @@ A configurable Python toolkit for batch file transfers over FTP. It combines a Y
 - **Format-aware validation** — Selects a handler by file extension before upload.
 - **Batch directory transfer** — Uploads matching local files or downloads files from a remote directory.
 - **Connection retries** — Configurable retry count, delay, timeout, passive mode, and filename encoding.
+- **Safer transfers** — Optional FTPS, confined download paths, atomic downloads, and archive extraction limits.
 - **Remote directory management** — Creates missing destination directories when changing to a remote path.
 - **Extensible handler registry** — Add support for a new format by implementing one handler interface.
 - **Local integration testing** — Includes a threaded test FTP server and an end-to-end shell script.
@@ -45,15 +46,16 @@ python3 ftp_automation.py --config path/to/config.yaml upload
 
 ```yaml
 ftp:
-  host: "127.0.0.1"       # FTP server hostname or IP address
-  port: 2121              # Standard FTP uses port 21
-  user: "test"
-  password: "test"
-  timeout: 10             # Connection timeout in seconds
-  max_retries: 2          # Maximum connection attempts
-  retry_delay: 1.0        # Delay between attempts in seconds
-  passive: true           # Recommended for most networks
-  encoding: "utf-8"      # Encoding used for filenames
+  host: "ftp.example.com"          # FTP server hostname or IP address
+  port: 21                          # Explicit FTPS commonly starts on port 21
+  user: "transfer-user"
+  password_env: "FTP_PASSWORD"     # Read the password from this environment variable
+  timeout: 10                       # Connection timeout in seconds
+  max_retries: 2                    # Maximum connection attempts
+  retry_delay: 1.0                  # Delay between attempts in seconds
+  passive: true                     # Recommended for most networks
+  encoding: "utf-8"                # Encoding used for filenames
+  tls: true                         # Encrypt control and data channels with FTPS
 
 tasks:
   - name: "Data File Upload"
@@ -68,7 +70,7 @@ tasks:
     local_dir: "./downloads"
 ```
 
-The CLI executes every task whose `action` matches the selected command. Upload patterns use Python glob syntax. Download tasks currently transfer every file in the specified remote directory.
+Export `FTP_PASSWORD` before running the CLI. The CLI executes every task whose `action` matches the selected command. Relative local paths are resolved from the configuration file's directory. Upload patterns use Python glob syntax; download tasks transfer every top-level file in the specified remote directory.
 
 ## Supported Formats
 
@@ -77,7 +79,7 @@ The CLI executes every task whose `action` matches the selected command. Upload 
 | Delimited data | `.csv`, `.tsv`, `.psv` | Requires at least one readable row; reads with the delimiter associated with the extension |
 | JSON | `.json`, `.jsonl` | Parses the document or each non-empty JSON Lines record |
 | XML | `.xml`, `.xsl`, `.xsd` | Parses the document with `xml.etree.ElementTree` |
-| Images | `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.tiff` | Verifies image integrity when Pillow is installed; otherwise checks that the path exists |
+| Images | `.png`, `.jpg`, `.jpeg`, `.gif`, `.bmp`, `.webp`, `.tiff` | Verifies image integrity when Pillow is installed; otherwise requires a non-empty regular file |
 | Binary fallback | All other extensions | Requires an existing, non-empty file |
 
 The binary handler also exposes SHA-256 checksums by default, while the format-specific handlers provide consistent `validate`, `read`, and `write` operations.
@@ -99,6 +101,7 @@ with FTPClient(
     host="server.example.com",
     user="username",
     password="password",
+    tls=True,
 ) as ftp:
     ftp.cwd("/incoming")
     ftp.upload(source, "/incoming/users.csv")
@@ -106,7 +109,7 @@ with FTPClient(
     ftp.download("/reports/latest.json", "downloads/latest.json")
 ```
 
-`FTPClient` can also list, delete, and rename remote files. Upload and download methods accept optional progress callbacks.
+`FTPClient` can also list, delete, and rename remote files. Upload and download methods accept optional callbacks with the signature `callback(transferred_bytes, total_bytes)`.
 
 ## Project Structure
 
@@ -116,6 +119,7 @@ ftp-automation/
 ├── config.yaml             # FTP connection and task configuration
 ├── example.py              # Library usage examples
 ├── test_ftp_server.py      # Threaded local FTP server for testing
+├── test_project.py         # Unit and regression tests
 ├── run_test.sh             # End-to-end transfer test harness
 ├── requirements.txt        # Required and optional dependencies
 ├── core/
@@ -171,7 +175,13 @@ Run the full local transfer workflow:
 bash run_test.sh
 ```
 
-The script creates sample data, rewrites `config.yaml` for local testing, starts the test server, exercises upload and download flows, and stops the server.
+The script creates an isolated temporary workspace and configuration, starts the test server, asserts byte-for-byte upload and download results, and always stops the server through a cleanup trap. Repository files are not rewritten.
+
+Run the unit and regression tests separately with:
+
+```bash
+python3 -m unittest discover -v
+```
 
 For manual testing, use two terminals:
 
@@ -188,6 +198,6 @@ The bundled server is intentionally minimal, accepts any credentials, and binds 
 ## Current Scope
 
 - Directory transfers are non-recursive and do not mirror deletions.
-- Remote listings assume a Unix-style FTP `LIST` response.
+- Remote listings prefer `MLSD` and fall back to Unix-style `LIST` parsing.
 - The download `pattern` setting is reserved but not yet applied.
 - Scheduler and compression utilities are available as modules but are not wired into the CLI workflow.
